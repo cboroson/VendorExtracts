@@ -62,12 +62,11 @@ function decrypt ( $file, $target ) {
     }
 }
 
-function sendemail ($to, $attachment, $Status, $vendor) {
-        Send-MailMessage -Attachments $attachment `
-                         -From "FileMover@jefferson.edu" `
+function sendemail ($to, $Status, $vendor, $log) {
+        Send-MailMessage -From "FileMover@jefferson.edu" `
                          -to $to `
                          -Subject "${Status}: $vendor Incoming file tranfer job" `
-                         -Body "The job ended with the status of $Status.  The log file for the run is attached." `
+                         -Body "The job ended with the status of $Status.`r`n`r`n$(get-content $log | out-string)" `
                          -smtpserver smtp.jefferson.edu
 }
 
@@ -77,7 +76,7 @@ function endscript {
     Stop-Transcript
 
     if ($RunStatus -ne "Success") {
-        sendemail -to "linuxadmin@jefferson.edu" -attachment $sessionLogFile -Status $RunStatus -vendor ""
+        sendemail -to "linuxadmin@jefferson.edu" -Status $RunStatus -vendor "" -log $sessionLogFile
     }
 
     Exit
@@ -441,7 +440,7 @@ foreach ($vendor in $vendors) {
     Write-Log -Path $logfile -Level Info -Message "Successfully closed SFTP session to $($vendor.IncomingSFTPHost)."
 
     if ($RunStatus -ne "Success" -or $vendor.AlwaysSendEmail -match "TRUE") {
-        sendemail -to $vendor.EmailRecipients -attachment $logfile -Status $RunStatus -vendor $vendor.name
+        sendemail -to $EmailRecipients -Status $RunStatus -vendor $vendor.name -log $logfile
     }
 
 } # end foreach vendor

@@ -63,12 +63,11 @@ function encrypt ( $file, $recipient ) {
     }
 }
 
-function sendemail ($to, $attachment, $Status, $vendor) {
-        Send-MailMessage -Attachments $attachment `
-                         -From "FileMover@jefferson.edu" `
+function sendemail ($to, $Status, $vendor, $log) {
+        Send-MailMessage -From "FileMover@jefferson.edu" `
                          -to $to `
                          -Subject "${Status}: $vendor Incoming file tranfer job" `
-                         -Body "The job ended with the status of $Status.  The log file for the run is attached." `
+                         -Body "The job ended with the status of $Status.`r`n`r`n$(get-content $log | out-string)" `
                          -smtpserver smtp.jefferson.edu
 }
 
@@ -78,7 +77,7 @@ function endscript {
     Stop-Transcript
 
     if ($RunStatus -ne "Success") {
-        sendemail -to "linuxadmin@jefferson.edu" -attachment $sessionLogFile -Status $RunStatus -vendor ""
+        sendemail -to "linuxadmin@jefferson.edu" -log $sessionLogFile -Status $RunStatus -vendor ""
     }
 
     Exit
@@ -248,7 +247,7 @@ foreach ($vendor in $vendors) {
         get-childitem $vendor.OutgoingNASDirectory -Exclude "*.gpg" -File -Recurse | where {$_.DirectoryName -notmatch "archive" -AND $_.name -match " "} | foreach {
             $New=$_.name.Replace(" ","_")
             Rename-Item -path $_.Fullname -newname $New -passthru
-            Write-Log -Path $logfile -Level Info -Message "Renamed file $_.fullname with space to $new"       
+            Write-Log -Path $logfile -Level Info -Message "Renamed file $($_.fullname) with space to $new"       
         }
 
 
@@ -430,7 +429,7 @@ foreach ($vendor in $vendors) {
     }
 
     if ($RunStatus -ne "Success" -or $vendor.AlwaysSendEmail -match "TRUE") {
-        sendemail -to $vendor.EmailRecipients -attachment $logfile -Status $RunStatus -vendor $vendor.name
+        sendemail -to $EmailRecipients -Status $RunStatus -vendor $vendor.name -log $logfile
     }
 
 } # end foreach vendor
