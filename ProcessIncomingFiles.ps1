@@ -19,38 +19,11 @@ Import-Module C:\scripts\Function-Write-Log.psm1
 # Import the function to validate the input file
 Import-Module C:\scripts\validateinputs.psm1
 
+# Import the function to retrieve credentials
+Import-Module C:\scripts\Function-Credentials.psm1
+
 # Load the list of vendors, paths and keynames
 $vendors = Import-Csv -Path c:\scripts\vendors.csv
-
-
-function setcredentials ( $vendor, $username, $password ) {
-
-    $credpath = "c:\keys\$vendor-$username.xml"
-    New-Object System.Management.Automation.PSCredential($username, (ConvertTo-SecureString -AsPlainText -Force $password)) | Export-CliXml $credpath
-
-}
-
-
-function getcredentials ( $vendor, $username ) {
-
-    $credpath = "c:\keys\$vendor-$username.xml"
-    if (Test-Path $credpath) {
-        try {
-            $ErrorActionPreference = "SilentlyContinue"
-            $cred = import-clixml -path $credpath -ErrorAction SilentlyContinue
-            $password = $cred.GetNetworkCredential().password
-        }
-        catch { 
-            $ErrorActionPreference = "Stop"
-            $password = "Error"
-        }
-    }    
-    else {
-        $password = "Not Found"
-    }
-
-    Return $password
-}
 
 
 # Open SFTP session with remote Linux host
@@ -89,11 +62,11 @@ function decrypt ( $file, $target ) {
     }
 }
 
-function sendemail ($to, $attachment, $Status) {
+function sendemail ($to, $attachment, $Status, $vendor) {
         Send-MailMessage -Attachments $attachment `
                          -From "FileMover@jefferson.edu" `
                          -to $to `
-                         -Subject "${Status}: Incoming sftp tranfer job" `
+                         -Subject "${Status}: $vendor Incoming file tranfer job" `
                          -Body "The job ended with the status of $Status.  The log file for the run is attached." `
                          -smtpserver smtp.jefferson.edu
 }
@@ -104,7 +77,7 @@ function endscript {
     Stop-Transcript
 
     if ($RunStatus -ne "Success") {
-        sendemail -to "linuxadmin@jefferson.edu" -attachment $sessionLogFile -Status $RunStatus
+        sendemail -to "linuxadmin@jefferson.edu" -attachment $sessionLogFile -Status $RunStatus -vendor ""
     }
 
     Exit
@@ -193,6 +166,9 @@ if ($result -contains "fail") {
 # Get private key passphrase from encrypted file
 $Passphrase = getcredentials -vendor "TJUH" -username "PrivateKeyPassphrase"
 
+# Create local temp directory if it doesn't exist
+if (-not (Test-Path $env:TEMP)) {New-Item -Path $env:TEMP -ItemType directory}
+
 # Disconnect existing network sessions to NAS Share
 $Mappings = Get-SmbMapping
 if ($mappings.RemotePath -eq "\\tjh.tju.edu\epic") {Remove-SmbMapping -remotePath \\tjh.tju.edu\epic -Force}
@@ -259,6 +235,12 @@ foreach ($vendor in $vendors) {
         # Open session to target SFTP host
         $SessionID = OpenSFTPSession -username $vendor.IncomingUser -password $password -server $vendor.IncomingSFTPHost -port $Vendor.IncomingSFTPPort
 
+        if ($SessionID -eq $null) {
+            Write-Log -Path $logfile -Level Error -Message "Failed to open SFTP session to $($vendor.IncomingSFTPHost).  Skipping file transfer for this vendor."
+            $RunStatus = "Failure"
+            Continue
+        }
+
         # Verify session opened properly
         if ($SessionID.GetType().Name -ne "Int32") {
             Write-Log -Path $logfile -Level Error -Message "Failed to open SFTP session to $($vendor.IncomingSFTPHost).  Skipping file transfer for this vendor."
@@ -278,7 +260,12 @@ foreach ($vendor in $vendors) {
         $FilesToProcess = ""
         $FilesToProcess = Get-SFTPChildItem -SessionId $SessionID -Path $Vendor.IncomingSFTPDirectory -Recursive | where {$_.isRegularFile -eq $true}
 
-        if ($FilesToProcess -eq "") {
+        if ($FilesToProcess -eq $null -and $vendor.NoFilesIsError -eq "TRUE") {
+            Write-Log -Path $logfile -Level Warn -Message "No incoming files found from $($vendor.name)."
+            $RunStatus = "No files found"
+        }
+
+        if ($FilesToProcess -eq $null -and $vendor.NoFilesIsError -eq "FALSE") {
             Write-Log -Path $logfile -Level Info -Message "No incoming files found from $($vendor.name)."
         }
 
@@ -374,7 +361,11 @@ foreach ($vendor in $vendors) {
             # and replaces backslashes with forward slashes.
             
             $TargetFileFullName = $($file.FullName.Substring($vendor.IncomingSFTPDirectory.Length)).replace("/","\")
-            $TargetPathOnly = $TargetFileFullName.Substring(0,$TargetFileFullName.IndexOf($ClearTextFileShortName)-1)
+
+            # Fix-up to accomodate situations where the source path is at the root (i.e. just "/")
+            If ($vendor.incomingSFTPDirectory -eq "/") {$i = "0"} else {$i = -1}
+
+            $TargetPathOnly = $TargetFileFullName.Substring(0,$TargetFileFullName.IndexOf($ClearTextFileShortName) + $i)
             $targetPath = $Vendor.IncomingNASDirectory + $targetpathonly
             $targetPathandfile = $TargetPath + "\" + $ClearTextFileShortName
 
@@ -401,6 +392,7 @@ foreach ($vendor in $vendors) {
                 $RenamedFile = $CleartextFileShortName + "_RENAMED_ON_" + $(get-date -Format MM-dd-yyyy)
                 Rename-Item -Path $targetPathandfile -NewName $RenamedFile
                 Write-Log -Path $logfile -Level Warn -Message "File $targetPathandfile already existed when the job ran.  The existing file was renamed to $RenamedFile ."
+                $RunStatus = "Warning"
             }
 
             Move-Item -Path $CleartextFile -Destination $targetPath -Force
@@ -449,7 +441,7 @@ foreach ($vendor in $vendors) {
     Write-Log -Path $logfile -Level Info -Message "Successfully closed SFTP session to $($vendor.IncomingSFTPHost)."
 
     if ($RunStatus -ne "Success" -or $vendor.AlwaysSendEmail -match "TRUE") {
-        sendemail -to $vendor.EmailRecipients -attachment $logfile -Status $RunStatus
+        sendemail -to $vendor.EmailRecipients -attachment $logfile -Status $RunStatus -vendor $vendor.name
     }
 
 } # end foreach vendor

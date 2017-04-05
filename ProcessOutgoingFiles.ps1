@@ -19,38 +19,11 @@ Import-Module C:\scripts\Function-Write-Log.psm1
 # Import the function to validate the input file
 Import-Module C:\scripts\validateinputs.psm1
 
+# Import the function to retrieve credentials
+Import-Module C:\scripts\Function-Credentials.psm1
+
 # Load the list of vendors, paths and keynames
 $vendors = Import-Csv -Path c:\scripts\vendors.csv
-
-
-function setcredentials ( $vendor, $username, $password ) {
-
-    $credpath = "c:\keys\$vendor-$username.xml"
-    New-Object System.Management.Automation.PSCredential($username, (ConvertTo-SecureString -AsPlainText -Force $password)) | Export-CliXml $credpath
-
-}
-
-
-function getcredentials ( $vendor, $username ) {
-
-    $credpath = "c:\keys\$vendor-$username.xml"
-    if (Test-Path $credpath) {
-        try {
-            $ErrorActionPreference = "SilentlyContinue"
-            $cred = import-clixml -path $credpath -ErrorAction SilentlyContinue
-            $password = $cred.GetNetworkCredential().password
-        }
-        catch { 
-            $ErrorActionPreference = "Stop"
-            $password = "Error"
-        }
-    }    
-    else {
-        $password = "Not Found"
-    }
-
-    Return $password
-}
 
 
 # Open SFTP session with remote Linux host
@@ -90,11 +63,11 @@ function encrypt ( $file, $recipient ) {
     }
 }
 
-function sendemail ($to, $attachment, $Status) {
+function sendemail ($to, $attachment, $Status, $vendor) {
         Send-MailMessage -Attachments $attachment `
                          -From "FileMover@jefferson.edu" `
                          -to $to `
-                         -Subject "${Status}: Outgoing sftp tranfer job" `
+                         -Subject "${Status}: $vendor Incoming file tranfer job" `
                          -Body "The job ended with the status of $Status.  The log file for the run is attached." `
                          -smtpserver smtp.jefferson.edu
 }
@@ -105,7 +78,7 @@ function endscript {
     Stop-Transcript
 
     if ($RunStatus -ne "Success") {
-        sendemail -to "linuxadmin@jefferson.edu" -attachment $sessionLogFile -Status $RunStatus
+        sendemail -to "linuxadmin@jefferson.edu" -attachment $sessionLogFile -Status $RunStatus -vendor ""
     }
 
     Exit
@@ -282,6 +255,15 @@ foreach ($vendor in $vendors) {
         # Enumerate the files to be processed
         $FilesToProcess = get-childitem $vendor.OutgoingNASDirectory -File -Recurse | where {$_.DirectoryName -notmatch "archive"}
 
+        if ($FilesToProcess -eq $null -and $vendor.NoFilesIsError -eq "TRUE") {
+            Write-Log -Path $logfile -Level Warn -Message "No outgoing files found for $($vendor.name)."
+            $RunStatus = "No files found"
+        }
+
+        if ($FilesToProcess -eq $null -and $vendor.NoFilesIsError -eq "FALSE") {
+            Write-Log -Path $logfile -Level Info -Message "No outgoing files found for $($vendor.name)."
+        }
+
         Foreach ($File in $FilesToProcess) {
             Write-Log -Path $logfile -Level Info -Message "*** Processing file $($file.fullname)"
 
@@ -307,8 +289,6 @@ foreach ($vendor in $vendors) {
 
 
                 # Verify the presence of the encrypted file on the source
-                # NOTE: THIS IS COMMENTED OUT BECAUSE SOME VENDORS (e.g. nthrive) 
-                # INGEST AND DELETE FILES FASTER THAN WE CAN VERIFY THEM
                 If (test-path $NewFullName) {
                     Write-Log -Path $logfile -Level Info -Message "Step 1 - Encrypted successfully"
                     $Extension = ".gpg"
@@ -348,6 +328,28 @@ foreach ($vendor in $vendors) {
                 Write-Log -Path $logfile -Level Info -Message "Step 2a - Directory $targetpath already exists on target."                
             }
 
+            # Check if file already exists in the target
+
+            if (Test-SFTPPath -sessionId $sessionID -Path $targetpathandfile) {
+                # Append the date to the target file name to make it unique
+                $renamedfile = $($newshortname + "_RENAMED_ON_" + $(get-date -format MM-dd-yyyy_HH-mm-ss))
+
+                # Rename the target file
+                Rename-SFTPFile -SessionId $SessionID -Path $targetpathandfile -NewName $renamedfile
+
+                # Verify file was renamed
+                If (Test-SFTPPath -SessionId $SessionID -Path $($targetpath + "/" + $RenamedFile)) {
+                    Write-Log -Path $logfile -Level Warn -Message "A file by the name $($file.name) already existed in target folder.  Renamed file to $renamedfile"
+                    $RunStatus = "Warning"
+                }
+                # Attempt to rename file failed
+                else {
+                    Write-Log -Path $logfile -Level Warn -Message "A file by the name $($file.name) already existed in target folder.  An attempt to rename the file to $renamedfile failed."
+                    $RunStatus = "Warning"
+                }                    
+            }
+                
+
             # Copy the encrypted file to the external sftp server
             Set-SFTPFile -SessionId $SessionID -LocalFile $NewFullName -RemotePath $targetPath -Overwrite
 
@@ -360,7 +362,7 @@ foreach ($vendor in $vendors) {
                 $FileCopyStatus = "good"
             }
             else {
-                Write-Log -Path $logfile -Level Info -Message "Step 2b - File $targetfileFullName could not be verified.  Either the transfer of this file did not succeed or the vendor ingested and deleted the file before we could verify its presence on the target."
+                Write-Log -Path $logfile -Level Warn -Message "Step 2b - File $targetfileFullName could not be verified.  Either the transfer of this file did not succeed or the vendor ingested and deleted the file before we could verify its presence on the target."
                 $FileCopyStatus = "good" # this should be "bad" but can't be due to the vendor point stated above
             }
 
@@ -428,7 +430,7 @@ foreach ($vendor in $vendors) {
     }
 
     if ($RunStatus -ne "Success" -or $vendor.AlwaysSendEmail -match "TRUE") {
-        sendemail -to $vendor.EmailRecipients -attachment $logfile -Status $RunStatus
+        sendemail -to $vendor.EmailRecipients -attachment $logfile -Status $RunStatus -vendor $vendor.name
     }
 
 } # end foreach vendor
